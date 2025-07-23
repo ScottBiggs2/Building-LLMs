@@ -207,7 +207,7 @@ class IterativeThinkingLLM(nn.Module):
                 # Check for exponential decay
                 if len(diff_history) >= 3: # only start checking at 3
                     recent_diffs = diff_history[-5:]
-                    decay_ok = all(recent_diffs[i] < recent_diffs[i-1] * 0.95 for i in range(1, 5))
+                    decay_ok = all(recent_diffs[i] < recent_diffs[i-1] * 0.95 for i in range(1, 3))
                     # Only allow stopping if mean diff is below a reasonable threshold
                     if decay_ok and np.mean(recent_diffs) < 1e-2:
                         print(f"Detected exponential decay at iteration {iteration + 1} (mean diff {np.mean(recent_diffs):.4e})")

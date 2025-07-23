@@ -268,6 +268,8 @@ class IterativeThinkingTrainer:
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
             self.optimizer.step()
+            self.scheduler.step()
+
             # Update metrics
             self.training_metrics['losses'].append(loss_dict['lm'].item())
             self.training_metrics['iteration_counts'].append(loss_dict['iterations'])
@@ -473,6 +475,9 @@ class IterativeThinkingTrainer:
                 # Save checkpoint
                 if self.step % self.config.save_interval == 0:
                     self.save_checkpoint()
+        
+        # Always save final model at end of training
+        self.save_checkpoint(is_best=False)
     
     def plot_training_curves(self):
         """Plot training metrics"""
@@ -520,7 +525,7 @@ def main():
         use_wandb=False,  # Set to True if you want to use wandb
         num_workers=0,  # Safe default
         pin_memory=False,  # Safe default
-        max_samples=10000  # Limit for debugging/low memory
+        max_samples=1000  # Limit for debugging/low memory
     )
     
     # Create trainer
