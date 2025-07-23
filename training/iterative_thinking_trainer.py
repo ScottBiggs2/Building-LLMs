@@ -392,7 +392,7 @@ class IterativeThinkingTrainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            'config': self.config,
+            'config': self.config.__dict__,  # Save as a dictionary for portability
             'training_metrics': self.training_metrics,
             'best_val_loss': self.best_val_loss
         }

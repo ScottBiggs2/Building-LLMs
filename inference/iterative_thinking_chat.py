@@ -3,6 +3,8 @@ import torch.nn.functional as F
 import pickle
 import os
 from models.iterative_thinking_LLM import IterativeThinkingLLM
+# Import TrainingConfig to allow torch.load to unpickle the object from the checkpoint
+from training.iterative_thinking_trainer import TrainingConfig
 from dataclasses import dataclass
 from typing import Optional
 
@@ -66,12 +68,21 @@ class IterativeThinkingInference:
         # Extract model config from checkpoint
         if 'config' in checkpoint:
             model_config = checkpoint['config']
-            model = IterativeThinkingLLM(
-                vocab_size=model_config['vocab_size'],
-                dim=model_config['dim'],
-                num_layers=model_config['num_layers'],
-                max_seq_len=model_config['max_seq_len']
-            )
+            # Handle both dict (from newer checkpoints) and dataclass object (from older checkpoints)
+            if isinstance(model_config, dict):
+                model = IterativeThinkingLLM(
+                    vocab_size=model_config['vocab_size'],
+                    dim=model_config['dim'],
+                    num_layers=model_config['num_layers'],
+                    max_seq_len=model_config['max_seq_len']
+                )
+            else:  # Assume it's a dataclass object
+                model = IterativeThinkingLLM(
+                    vocab_size=model_config.vocab_size,
+                    dim=model_config.dim,
+                    num_layers=model_config.num_layers,
+                    max_seq_len=model_config.max_seq_len
+                )
         else:
             # Fallback: try to infer from model state dict
             print("Warning: No config found in checkpoint, using default parameters")
