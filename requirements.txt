@@ -1,8 +1,6 @@
-# os
-# re
-# requests
-# string
-# collections
-# typing
-# numpy
-# pickle
+requests
+numpy
+torch
+wandb
+tqdm
+matplotlib
