@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import numpy as np
 
 class LearnedWaveletActivation(nn.Module):
     """Custom activation with learned wavelet-like behavior and exponential decay"""
@@ -101,9 +102,9 @@ class IterativeThinkingLLM(nn.Module):
         self.output_head = nn.Linear(dim, vocab_size)  # h_i -> logits
         self.recurrence_head = nn.Linear(dim, dim)     # h_j for next iteration
         
-        # Convergence parameters
+        # Convergence parameters - don't like that these are hardcoded args but it's fine for now I guess
         self.convergence_threshold = 1e-4
-        self.max_iterations = 20
+        self.max_iterations = 200
         self.min_iterations = 3
         
     def get_initial_embedding(self, input_ids):
@@ -160,7 +161,7 @@ class IterativeThinkingLLM(nn.Module):
         prev = history[-2*window:-window]
         
         similarity = sum(abs(a - b) for a, b in zip(recent, prev)) / window
-        return similarity < self.convergence_threshold * 2
+        return similarity < self.convergence_threshold 
     
     def forward(self, input_ids):
         """
@@ -204,11 +205,12 @@ class IterativeThinkingLLM(nn.Module):
                     break
                     
                 # Check for exponential decay
-                if len(diff_history) >= 4:
+                if len(diff_history) >= 3: # only start checking at 3
                     recent_diffs = diff_history[-5:]
-                    if all(recent_diffs[i] < recent_diffs[i-1] * 0.95 
-                          for i in range(1, len(recent_diffs))):
-                        print(f"Detected exponential decay at iteration {iteration + 1}")
+                    decay_ok = all(recent_diffs[i] < recent_diffs[i-1] * 0.95 for i in range(1, 5))
+                    # Only allow stopping if mean diff is below a reasonable threshold
+                    if decay_ok and np.mean(recent_diffs) < 1e-2:
+                        print(f"Detected exponential decay at iteration {iteration + 1} (mean diff {np.mean(recent_diffs):.4e})")
                         break
 
                 # Check if unsuccessful:

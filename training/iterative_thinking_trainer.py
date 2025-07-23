@@ -41,8 +41,8 @@ class TrainingConfig:
     eval_steps: int = 100
     
     # Convergence-specific
-    convergence_weight: float = 0.1  # Weight for convergence loss
-    efficiency_weight: float = 0.05  # Penalty for too many iterations
+    convergence_weight: float = 0.05  # Weight for convergence loss
+    efficiency_weight: float = 0.01  # Penalty for too many iterations
     
     # Logging
     log_interval: int = 100
@@ -192,13 +192,13 @@ class IterativeThinkingTrainer:
     
     def compute_loss(self, output: Dict, targets: torch.Tensor, mask_positions: torch.Tensor = None) -> Dict[str, torch.Tensor]:
         """Compute multi-component loss for non-autoregressive iterative thinking"""
-        logits = output['logits']  # Shape: (batch, seq_len, vocab_size)
+        logits = output['logits']
         iterations = output['iterations']
         final_diff = output['final_diff']
         
         batch_size, seq_len, vocab_size = logits.shape
         
-        # Primary language modeling loss - predict ALL positions simultaneously
+        # Primary language modeling loss
         lm_loss = F.cross_entropy(
             logits.reshape(-1, vocab_size),
             targets.reshape(-1),
@@ -210,25 +210,35 @@ class IterativeThinkingTrainer:
             mask_loss = 0.0
             for batch_idx in range(batch_size):
                 if len(mask_positions[batch_idx]) > 0:
-                    batch_logits = logits[batch_idx][mask_positions[batch_idx]]  # (num_masked, vocab_size)
-                    batch_targets = targets[batch_idx][mask_positions[batch_idx]]  # (num_masked,)
+                    batch_logits = logits[batch_idx][mask_positions[batch_idx]]
+                    batch_targets = targets[batch_idx][mask_positions[batch_idx]]
                     mask_loss += F.cross_entropy(batch_logits, batch_targets)
             
             if batch_size > 0:
                 mask_loss = mask_loss / batch_size
-                # Combine both losses
                 lm_loss = 0.7 * lm_loss + 0.3 * mask_loss
         
-        # Convergence efficiency loss (encourage faster convergence)
+        # Convergence loss - encourage actual convergence
         convergence_loss = torch.tensor(final_diff, device=self.device) * self.config.convergence_weight
         
-        # Iteration efficiency loss (penalty for too many iterations)
-        # For non-autoregressive, we want fewer iterations since we're generating everything at once
-        target_iterations = 8  # Lower target for parallel generation
-        iteration_penalty = abs(iterations - target_iterations) / target_iterations
-        efficiency_loss = torch.tensor(iteration_penalty, device=self.device) * self.config.efficiency_weight
+        # NEW: Smarter iteration efficiency loss with warmup
+        efficiency_loss = torch.tensor(0.0, device=self.device)
         
-        # Total loss
+        # Only apply efficiency penalty after step 2000 (let it learn to think first)
+        if hasattr(self, 'step') and self.step > 200:
+            # Define acceptable range
+            min_acceptable = 8    # Don't penalize anything >= 8 iterations
+            max_acceptable = 32   # Start penalizing above 32 iterations
+            
+            if iterations < min_acceptable:
+                # Heavy penalty for premature stopping
+                penalty = (min_acceptable - iterations) / min_acceptable
+                efficiency_loss = torch.tensor(penalty, device=self.device) * self.config.efficiency_weight * 3
+            elif iterations > max_acceptable:
+                # Gentle penalty for excessive thinking
+                penalty = (iterations - max_acceptable) / max_acceptable * 0.5
+                efficiency_loss = torch.tensor(penalty, device=self.device) * self.config.efficiency_weight
+        
         total_loss = lm_loss + convergence_loss + efficiency_loss
         
         return {
@@ -501,16 +511,16 @@ def main():
     # Configuration
     config = TrainingConfig(
         data_dir="shakespeare_data",
-        dim=128,
-        num_layers=4,
+        dim=256,
+        num_layers=6,
         max_seq_len=128,
-        batch_size=32,  # Start smaller for this complex model
+        batch_size=64,  # Start smaller for this complex model
         learning_rate=1e-4,
         max_epochs=1,
         use_wandb=False,  # Set to True if you want to use wandb
         num_workers=0,  # Safe default
         pin_memory=False,  # Safe default
-        max_samples=1000  # Limit for debugging/low memory
+        max_samples=10000  # Limit for debugging/low memory
     )
     
     # Create trainer
