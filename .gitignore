@@ -4,4 +4,4 @@ checkpoints_iterative/
 __pycache__/
 **/__pycache__/
 *.pyc
-*.pyo
+*.pyo__pycache__/
