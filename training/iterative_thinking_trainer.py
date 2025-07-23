@@ -26,7 +26,7 @@ class TrainingConfig:
     dim: int = 256
     num_layers: int = 6
     max_seq_len: int = 256
-    
+
     # Training
     batch_size: int = 32
     learning_rate: float = 3e-4
@@ -118,7 +118,6 @@ class IterativeThinkingTrainer:
     
     def create_model(self):
         """Create the iterative thinking model"""
-        from paste import IterativeThinkingLLM  # Import from the provided file
         
         model = IterativeThinkingLLM(
             vocab_size=self.config.vocab_size,
