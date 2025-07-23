@@ -1,2 +1,3 @@
 .venv/
-data/shakespeare_data/
+shakespeare_data/
+checkpoints_iterative/

@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import pickle
 import os
+import warnings  # <-- Add for warning suppression
 from torch.utils.data import DataLoader, Dataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import wandb
@@ -14,7 +15,7 @@ from typing import Optional, Dict, List, Tuple
 
 # Import the iterative thinking model (assuming it's in iterative_thinking_llm.py)
 from models.iterative_thinking_LLM import IterativeThinkingLLM
-from data.data_class import ShakespeareDataset
+from data.data_class import ShakespeareDataset, NonAutoregressiveDataset
 
 @dataclass
 class TrainingConfig:
@@ -26,7 +27,7 @@ class TrainingConfig:
     dim: int = 256
     num_layers: int = 6
     max_seq_len: int = 256
-
+    
     # Training
     batch_size: int = 32
     learning_rate: float = 3e-4
@@ -51,6 +52,11 @@ class TrainingConfig:
     
     # Device
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # DataLoader and memory management
+    num_workers: int = 0  # Default to 0 for safety
+    pin_memory: bool = False  # Default to False for safety
+    max_samples: Optional[int] = None  # Limit number of samples loaded
 
 class IterativeThinkingTrainer:
     """Trainer for the Iterative Thinking LLM"""
@@ -110,14 +116,20 @@ class IterativeThinkingTrainer:
         with open(vocab_path, 'rb') as f:
             vocab_data = pickle.load(f)
         
-        self.config.vocab_size = vocab_data['vocab_size']
+        # Reserve the last token as a MASK token for non-autoregressive generation
+        self.config.vocab_size = vocab_data['vocab_size'] + 1  # +1 for MASK token
         self.char_to_idx = vocab_data['char_to_idx']
         self.idx_to_char = vocab_data['idx_to_char']
         
-        print(f"Loaded vocabulary: {self.config.vocab_size} characters")
+        # Add MASK token
+        self.char_to_idx['<MASK>'] = self.config.vocab_size - 1
+        self.idx_to_char[self.config.vocab_size - 1] = '<MASK>'
+        
+        print(f"Loaded vocabulary: {vocab_data['vocab_size']} characters + 1 MASK token = {self.config.vocab_size} total")
     
     def create_model(self):
         """Create the iterative thinking model"""
+        # from paste import IterativeThinkingLLM  # Import from the provided file
         
         model = IterativeThinkingLLM(
             vocab_size=self.config.vocab_size,
@@ -140,59 +152,79 @@ class IterativeThinkingTrainer:
         return model
     
     def create_dataloaders(self):
-        """Create training and validation dataloaders"""
-        train_dataset = ShakespeareDataset(
+        """Create training and validation dataloaders for non-autoregressive training"""
+        train_dataset = NonAutoregressiveDataset(
             os.path.join(self.config.data_dir, "train_encoded.npy"),
-            seq_len=self.config.max_seq_len
+            seq_len=self.config.max_seq_len,
+            mask_ratio=0.6,  # Mask 60% of tokens for training
+            max_samples=self.config.max_samples
         )
         
-        val_dataset = ShakespeareDataset(
+        val_dataset = NonAutoregressiveDataset(
             os.path.join(self.config.data_dir, "val_encoded.npy"),
-            seq_len=self.config.max_seq_len
+            seq_len=self.config.max_seq_len,
+            mask_ratio=0.6,
+            max_samples=self.config.max_samples
         )
         
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.config.batch_size,
             shuffle=True,
-            num_workers=4,
-            pin_memory=True
+            num_workers=self.config.num_workers,
+            pin_memory=self.config.pin_memory
         )
         
         val_loader = DataLoader(
             val_dataset,
             batch_size=self.config.batch_size,
             shuffle=False,
-            num_workers=4,
-            pin_memory=True
+            num_workers=self.config.num_workers,
+            pin_memory=self.config.pin_memory
         )
         
-        print(f"Created dataloaders:")
+        print(f"Created non-autoregressive dataloaders:")
         print(f"  Training samples: {len(train_dataset)}")
         print(f"  Validation samples: {len(val_dataset)}")
         print(f"  Batch size: {self.config.batch_size}")
         
         return train_loader, val_loader
     
-    def compute_loss(self, output: Dict, targets: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Compute multi-component loss for iterative thinking"""
-        logits = output['logits']
+    def compute_loss(self, output: Dict, targets: torch.Tensor, mask_positions: torch.Tensor = None) -> Dict[str, torch.Tensor]:
+        """Compute multi-component loss for non-autoregressive iterative thinking"""
+        logits = output['logits']  # Shape: (batch, seq_len, vocab_size)
         iterations = output['iterations']
         final_diff = output['final_diff']
         
-        # Primary language modeling loss
+        batch_size, seq_len, vocab_size = logits.shape
+        
+        # Primary language modeling loss - predict ALL positions simultaneously
         lm_loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)),
+            logits.reshape(-1, vocab_size),
             targets.reshape(-1),
             ignore_index=-1
         )
+        
+        # Optional: Focused loss only on masked positions
+        if mask_positions is not None and len(mask_positions) > 0:
+            mask_loss = 0.0
+            for batch_idx in range(batch_size):
+                if len(mask_positions[batch_idx]) > 0:
+                    batch_logits = logits[batch_idx][mask_positions[batch_idx]]  # (num_masked, vocab_size)
+                    batch_targets = targets[batch_idx][mask_positions[batch_idx]]  # (num_masked,)
+                    mask_loss += F.cross_entropy(batch_logits, batch_targets)
+            
+            if batch_size > 0:
+                mask_loss = mask_loss / batch_size
+                # Combine both losses
+                lm_loss = 0.7 * lm_loss + 0.3 * mask_loss
         
         # Convergence efficiency loss (encourage faster convergence)
         convergence_loss = torch.tensor(final_diff, device=self.device) * self.config.convergence_weight
         
         # Iteration efficiency loss (penalty for too many iterations)
-        # Ideal number of iterations is around 5-10
-        target_iterations = 7
+        # For non-autoregressive, we want fewer iterations since we're generating everything at once
+        target_iterations = 8  # Lower target for parallel generation
         iteration_penalty = abs(iterations - target_iterations) / target_iterations
         efficiency_loss = torch.tensor(iteration_penalty, device=self.device) * self.config.efficiency_weight
         
@@ -208,39 +240,49 @@ class IterativeThinkingTrainer:
             'final_diff': final_diff
         }
     
-    def train_step(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> Dict:
-        """Single training step"""
-        inputs, targets = batch
-        inputs, targets = inputs.to(self.device), targets.to(self.device)
-        
-        self.optimizer.zero_grad()
-        
-        # Forward pass
-        output = self.model(inputs)
-        
-        # Compute loss
-        loss_dict = self.compute_loss(output, targets)
-        
-        # Backward pass
-        loss_dict['total'].backward()
-        
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
-        
-        self.optimizer.step()
-        self.scheduler.step()
-        
-        # Update metrics
-        self.training_metrics['losses'].append(loss_dict['lm'].item())
-        self.training_metrics['iteration_counts'].append(loss_dict['iterations'])
-        self.training_metrics['convergence_diffs'].append(loss_dict['final_diff'])
-        self.training_metrics['learning_rates'].append(self.scheduler.get_last_lr()[0])
-        
-        return loss_dict
+    def train_step(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Dict:
+        """Single training step for non-autoregressive training"""
+        try:
+            inputs, targets, mask_positions = batch
+            inputs, targets = inputs.to(self.device), targets.to(self.device)
+            # Replace -1 placeholders with actual mask token
+            mask_token_id = self.config.vocab_size - 1
+            inputs = torch.where(inputs == -1, mask_token_id, inputs)
+            self.optimizer.zero_grad()
+            # Forward pass - model thinks about entire sequence and outputs all logits
+            output = self.model(inputs)
+            # Compute loss
+            loss_dict = self.compute_loss(output, targets, mask_positions)
+            # Backward pass
+            loss_dict['total'].backward()
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+            self.optimizer.step()
+            # Update metrics
+            self.training_metrics['losses'].append(loss_dict['lm'].item())
+            self.training_metrics['iteration_counts'].append(loss_dict['iterations'])
+            self.training_metrics['convergence_diffs'].append(loss_dict['final_diff'])
+            self.training_metrics['learning_rates'].append(self.scheduler.get_last_lr()[0])
+            # CUDA memory management
+            if self.device.type == 'cuda':
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, 'ipc_collect'):
+                    torch.cuda.ipc_collect()
+            return loss_dict
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                print("[WARNING] CUDA out of memory. Skipping batch.")
+                if self.device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                    if hasattr(torch.cuda, 'ipc_collect'):
+                        torch.cuda.ipc_collect()
+                return {'total': torch.tensor(0.0), 'lm': torch.tensor(0.0), 'convergence': torch.tensor(0.0), 'efficiency': torch.tensor(0.0), 'iterations': 0, 'final_diff': 0.0}
+            else:
+                raise
     
     @torch.no_grad()
     def evaluate(self) -> Dict:
-        """Evaluate model on validation set"""
+        """Evaluate model on validation set using non-autoregressive approach"""
         self.model.eval()
         
         total_loss = 0
@@ -251,63 +293,84 @@ class IterativeThinkingTrainer:
         for batch in tqdm(self.val_loader, desc="Evaluating", leave=False):
             if num_batches >= self.config.eval_steps:
                 break
-                
-            inputs, targets = batch
-            inputs, targets = inputs.to(self.device), targets.to(self.device)
-            
-            output = self.model(inputs)
-            loss_dict = self.compute_loss(output, targets)
-            
-            total_loss += loss_dict['lm'].item()
-            total_iterations += loss_dict['iterations']
-            total_convergence_diff += loss_dict['final_diff']
-            num_batches += 1
-        
+            try:
+                inputs, targets, mask_positions = batch
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                # Replace -1 placeholders with actual mask token
+                mask_token_id = self.config.vocab_size - 1
+                inputs = torch.where(inputs == -1, mask_token_id, inputs)
+                output = self.model(inputs)
+                loss_dict = self.compute_loss(output, targets, mask_positions)
+                total_loss += loss_dict['lm'].item()
+                total_iterations += loss_dict['iterations']
+                total_convergence_diff += loss_dict['final_diff']
+                num_batches += 1
+                # CUDA memory management
+                if self.device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                    if hasattr(torch.cuda, 'ipc_collect'):
+                        torch.cuda.ipc_collect()
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    print("[WARNING] CUDA out of memory during evaluation. Skipping batch.")
+                    if self.device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                        if hasattr(torch.cuda, 'ipc_collect'):
+                            torch.cuda.ipc_collect()
+                    continue
+                else:
+                    raise
         self.model.train()
-        
+        if num_batches == 0:
+            return {'val_loss': float('inf'), 'avg_iterations': 0, 'avg_convergence_diff': 0}
         return {
             'val_loss': total_loss / num_batches,
             'avg_iterations': total_iterations / num_batches,
             'avg_convergence_diff': total_convergence_diff / num_batches
         }
     
-    def generate_sample(self, prompt: str = "HAMLET:", max_new_tokens: int = 200) -> str:
-        """Generate text sample"""
+    def generate_sample(self, prompt: str = "HAMLET:", target_length: int = 200) -> str:
+        """Generate text sample using non-autoregressive parallel generation"""
         self.model.eval()
         
-        # Encode prompt
-        input_ids = [self.char_to_idx.get(c, 0) for c in prompt]
+        # Encode prompt and pad to target length
+        prompt_ids = [self.char_to_idx.get(c, 0) for c in prompt]
+        
+        # Create input sequence: prompt + special tokens for positions to generate
+        # We'll use a special "MASK" token (vocab_size-1) for positions to generate
+        mask_token = self.config.vocab_size - 1
+        
+        # Prepare input: [prompt] + [MASK] * (target_length - len(prompt))
+        total_length = min(target_length, self.config.max_seq_len)
+        if len(prompt_ids) >= total_length:
+            input_ids = prompt_ids[:total_length]
+        else:
+            input_ids = prompt_ids + [mask_token] * (total_length - len(prompt_ids))
+        
         input_tensor = torch.tensor([input_ids], device=self.device)
         
-        generated = input_ids.copy()
-        
         with torch.no_grad():
-            for _ in range(max_new_tokens):
-                if len(generated) >= self.config.max_seq_len:
-                    # Truncate to maintain context window
-                    input_tensor = torch.tensor([generated[-self.config.max_seq_len:]], device=self.device)
-                
-                output = self.model(input_tensor)
-                logits = output['logits'][0, -1, :]  # Last token logits
-                
-                # Sample next token
-                probs = F.softmax(logits, dim=-1)
-                next_token = torch.multinomial(probs, 1).item()
-                
-                generated.append(next_token)
-                
-                # Update input for next iteration
-                input_tensor = torch.tensor([generated[-self.config.max_seq_len:]], device=self.device)
-                
-                # Stop if we generate a natural stopping point
-                if next_token == self.char_to_idx.get('\n', 0):
-                    break
+            # Single forward pass generates ALL tokens simultaneously
+            output = self.model(input_tensor)
+            logits = output['logits'][0]  # Shape: (seq_len, vocab_size)
+            
+            # Sample all tokens at once from the logits
+            probs = F.softmax(logits, dim=-1)
+            generated_tokens = torch.multinomial(probs, 1).squeeze(-1)  # Shape: (seq_len,)
+            
+            # Keep the original prompt, only replace the masked positions
+            final_tokens = input_ids.copy()
+            prompt_len = len(prompt_ids)
+            
+            # Replace masked positions with generated tokens
+            for i in range(prompt_len, len(final_tokens)):
+                final_tokens[i] = generated_tokens[i].item()
         
         # Decode generated text
-        generated_text = ''.join([self.idx_to_char.get(i, '?') for i in generated])
+        generated_text = ''.join([self.idx_to_char.get(i, '?') for i in final_tokens])
         
         self.model.train()
-        return generated_text
+        return generated_text, output['iterations'], output['final_diff']
     
     def save_checkpoint(self, is_best: bool = False):
         """Save model checkpoint"""
@@ -376,16 +439,19 @@ class IterativeThinkingTrainer:
                     print(f"\nStep {self.step} - Val Loss: {val_metrics['val_loss']:.4f}, "
                           f"Avg Iterations: {val_metrics['avg_iterations']:.1f}")
                     
-                    # Generate sample
-                    sample_text = self.generate_sample()
-                    print(f"Sample generation:\n{sample_text[:200]}...\n")
+                    # Generate sample using parallel generation
+                    sample_text, sample_iterations, sample_convergence = self.generate_sample()
+                    print(f"Sample generation (iterations: {sample_iterations}, convergence: {sample_convergence:.1e}):")
+                    print(f"{sample_text[:200]}...\n")
                     
                     if self.config.use_wandb:
                         wandb.log({
                             'val/loss': val_metrics['val_loss'],
                             'val/avg_iterations': val_metrics['avg_iterations'],
                             'val/avg_convergence_diff': val_metrics['avg_convergence_diff'],
-                            'sample_text': wandb.Html(f"<pre>{sample_text}</pre>"),
+                            'sample/text': wandb.Html(f"<pre>{sample_text}</pre>"),
+                            'sample/iterations': sample_iterations,
+                            'sample/convergence_diff': sample_convergence,
                             'step': self.step
                         })
                     
@@ -435,13 +501,16 @@ def main():
     # Configuration
     config = TrainingConfig(
         data_dir="shakespeare_data",
-        dim=256,
-        num_layers=6,
-        max_seq_len=256,
-        batch_size=16,  # Start smaller for this complex model
+        dim=128,
+        num_layers=4,
+        max_seq_len=128,
+        batch_size=32,  # Start smaller for this complex model
         learning_rate=1e-4,
-        max_epochs=5,
-        use_wandb=False  # Set to True if you want to use wandb
+        max_epochs=1,
+        use_wandb=False,  # Set to True if you want to use wandb
+        num_workers=0,  # Safe default
+        pin_memory=False,  # Safe default
+        max_samples=1000  # Limit for debugging/low memory
     )
     
     # Create trainer
@@ -463,3 +532,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# python -m training.iterative_thinking_trainer

@@ -49,8 +49,8 @@ class TransformerLayer(nn.Module):
         
         self.ff = nn.Sequential(
             nn.Linear(dim, ff_dim),
-            nn.GELU(),
-            nn.Linear(ff_dim, dim)
+            LearnedWaveletActivation(ff_dim),
+            nn.Linear(ff_dim, dim),
         )
         self.norm2 = nn.LayerNorm(dim)
         
@@ -204,15 +204,15 @@ class IterativeThinkingLLM(nn.Module):
                     break
                     
                 # Check for exponential decay
-                if len(diff_history) >= 5:
+                if len(diff_history) >= 4:
                     recent_diffs = diff_history[-5:]
-                    if all(recent_diffs[i] < recent_diffs[i-1] * 0.9 
+                    if all(recent_diffs[i] < recent_diffs[i-1] * 0.95 
                           for i in range(1, len(recent_diffs))):
                         print(f"Detected exponential decay at iteration {iteration + 1}")
                         break
 
                 # Check if unsuccessful:
-                if len(diff_history) >= 50:
+                if len(diff_history) >= self.max_iterations-2:
                     print(f"Exceeded maximum thinking iterations")
                     break
         
