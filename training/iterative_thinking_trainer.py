@@ -513,19 +513,19 @@ class IterativeThinkingTrainer:
 
 def main():
     """Main training script"""
-    # Configuration
+    # Configuration - ready for a large overnight run
     config = TrainingConfig(
         data_dir="shakespeare_data",
-        dim=256,
-        num_layers=6,
+        dim=512,
+        num_layers=8,
         max_seq_len=128,
-        batch_size=64,  # Start smaller for this complex model
+        batch_size=32,  # Start smaller for this complex model
         learning_rate=1e-4,
-        max_epochs=1,
+        max_epochs=5,
         use_wandb=False,  # Set to True if you want to use wandb
         num_workers=0,  # Safe default
         pin_memory=False,  # Safe default
-        max_samples=1000  # Limit for debugging/low memory
+        max_samples=10000  # Limit for debugging/low memory
     )
     
     # Create trainer
