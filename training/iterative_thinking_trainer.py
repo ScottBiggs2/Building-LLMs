@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import pickle
 import os
+import gc  # Import the garbage collector
 import warnings  # <-- Add for warning suppression
 from torch.utils.data import DataLoader, Dataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -34,6 +35,7 @@ class TrainingConfig:
     weight_decay: float = 0.1
     max_epochs: int = 100
     warmup_steps: int = 1000
+    gradient_accumulation_steps: int = 4  # Key for memory saving
     grad_clip: float = 1.0
     
     # Evaluation
@@ -250,48 +252,6 @@ class IterativeThinkingTrainer:
             'final_diff': final_diff
         }
     
-    def train_step(self, batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> Dict:
-        """Single training step for non-autoregressive training"""
-        try:
-            inputs, targets, mask_positions = batch
-            inputs, targets = inputs.to(self.device), targets.to(self.device)
-            # Replace -1 placeholders with actual mask token
-            mask_token_id = self.config.vocab_size - 1
-            inputs = torch.where(inputs == -1, mask_token_id, inputs)
-            self.optimizer.zero_grad()
-            # Forward pass - model thinks about entire sequence and outputs all logits
-            output = self.model(inputs)
-            # Compute loss
-            loss_dict = self.compute_loss(output, targets, mask_positions)
-            # Backward pass
-            loss_dict['total'].backward()
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
-            self.optimizer.step()
-            self.scheduler.step()
-
-            # Update metrics
-            self.training_metrics['losses'].append(loss_dict['lm'].item())
-            self.training_metrics['iteration_counts'].append(loss_dict['iterations'])
-            self.training_metrics['convergence_diffs'].append(loss_dict['final_diff'])
-            self.training_metrics['learning_rates'].append(self.scheduler.get_last_lr()[0])
-            # CUDA memory management
-            if self.device.type == 'cuda':
-                torch.cuda.empty_cache()
-                if hasattr(torch.cuda, 'ipc_collect'):
-                    torch.cuda.ipc_collect()
-            return loss_dict
-        except RuntimeError as e:
-            if 'out of memory' in str(e):
-                print("[WARNING] CUDA out of memory. Skipping batch.")
-                if self.device.type == 'cuda':
-                    torch.cuda.empty_cache()
-                    if hasattr(torch.cuda, 'ipc_collect'):
-                        torch.cuda.ipc_collect()
-                return {'total': torch.tensor(0.0), 'lm': torch.tensor(0.0), 'convergence': torch.tensor(0.0), 'efficiency': torch.tensor(0.0), 'iterations': 0, 'final_diff': 0.0}
-            else:
-                raise
-    
     @torch.no_grad()
     def evaluate(self) -> Dict:
         """Evaluate model on validation set using non-autoregressive approach"""
@@ -317,18 +277,16 @@ class IterativeThinkingTrainer:
                 total_iterations += loss_dict['iterations']
                 total_convergence_diff += loss_dict['final_diff']
                 num_batches += 1
-                # CUDA memory management
+                # Memory management
                 if self.device.type == 'cuda':
                     torch.cuda.empty_cache()
-                    if hasattr(torch.cuda, 'ipc_collect'):
-                        torch.cuda.ipc_collect()
+                elif self.device.type == 'mps':
+                    torch.mps.empty_cache()
+                gc.collect()
             except RuntimeError as e:
                 if 'out of memory' in str(e):
-                    print("[WARNING] CUDA out of memory during evaluation. Skipping batch.")
-                    if self.device.type == 'cuda':
-                        torch.cuda.empty_cache()
-                        if hasattr(torch.cuda, 'ipc_collect'):
-                            torch.cuda.ipc_collect()
+                    print("[WARNING] Out of memory during evaluation. Skipping batch.")
+                    self.clear_memory()
                     continue
                 else:
                     raise
@@ -408,6 +366,15 @@ class IterativeThinkingTrainer:
             
         print(f"Saved checkpoint: {checkpoint_path}")
     
+    def clear_memory(self):
+        """Aggressively clear memory."""
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        elif self.device.type == 'mps':
+            torch.mps.empty_cache()
+        gc.collect()
+
     def train(self):
         """Main training loop"""
         print("Starting training...")
@@ -418,63 +385,89 @@ class IterativeThinkingTrainer:
             self.epoch = epoch
             
             # Training loop
+            self.model.train()
+            self.optimizer.zero_grad()
             progress_bar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.config.max_epochs}")
             
             for batch_idx, batch in enumerate(progress_bar):
-                loss_dict = self.train_step(batch)
-                self.step += 1
-                
-                # Update progress bar
-                progress_bar.set_postfix({
-                    'loss': f"{loss_dict['lm'].item():.4f}",
-                    'iter': loss_dict['iterations'],
-                    'conv': f"{loss_dict['final_diff']:.1e}"
-                })
-                
-                # Logging
-                if self.step % self.config.log_interval == 0:
-                    if self.config.use_wandb:
-                        wandb.log({
-                            'train/loss': loss_dict['lm'].item(),
-                            'train/convergence_loss': loss_dict['convergence'].item(),
-                            'train/efficiency_loss': loss_dict['efficiency'].item(),
-                            'train/iterations': loss_dict['iterations'],
-                            'train/convergence_diff': loss_dict['final_diff'],
-                            'train/lr': self.scheduler.get_last_lr()[0],
-                            'step': self.step
-                        })
-                
-                # Evaluation
-                if self.step % self.config.eval_interval == 0:
-                    val_metrics = self.evaluate()
+                try:
+                    inputs, targets, mask_positions = batch
+                    inputs, targets = inputs.to(self.device), targets.to(self.device)
+                    mask_token_id = self.config.vocab_size - 1
+                    inputs = torch.where(inputs == -1, mask_token_id, inputs)
+
+                    # Forward pass
+                    output = self.model(inputs)
+                    loss_dict = self.compute_loss(output, targets, mask_positions)
                     
-                    print(f"\nStep {self.step} - Val Loss: {val_metrics['val_loss']:.4f}, "
-                          f"Avg Iterations: {val_metrics['avg_iterations']:.1f}")
-                    
-                    # Generate sample using parallel generation
-                    sample_text, sample_iterations, sample_convergence = self.generate_sample()
-                    print(f"Sample generation (iterations: {sample_iterations}, convergence: {sample_convergence:.1e}):")
-                    print(f"{sample_text[:200]}...\n")
-                    
-                    if self.config.use_wandb:
-                        wandb.log({
-                            'val/loss': val_metrics['val_loss'],
-                            'val/avg_iterations': val_metrics['avg_iterations'],
-                            'val/avg_convergence_diff': val_metrics['avg_convergence_diff'],
-                            'sample/text': wandb.Html(f"<pre>{sample_text}</pre>"),
-                            'sample/iterations': sample_iterations,
-                            'sample/convergence_diff': sample_convergence,
-                            'step': self.step
-                        })
-                    
-                    # Save best model
-                    if val_metrics['val_loss'] < self.best_val_loss:
-                        self.best_val_loss = val_metrics['val_loss']
-                        self.save_checkpoint(is_best=True)
-                
-                # Save checkpoint
-                if self.step % self.config.save_interval == 0:
-                    self.save_checkpoint()
+                    # Scale loss for gradient accumulation
+                    scaled_loss = loss_dict['total'] / self.config.gradient_accumulation_steps
+                    scaled_loss.backward()
+
+                    progress_bar.set_postfix({
+                        'loss': f"{loss_dict['lm'].item():.4f}",
+                        'iter': loss_dict['iterations'],
+                        'conv': f"{loss_dict['final_diff']:.1e}"
+                    })
+
+                    # Perform optimizer step after accumulating gradients
+                    if (batch_idx + 1) % self.config.gradient_accumulation_steps == 0:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                        self.optimizer.step()
+                        self.scheduler.step()
+                        self.optimizer.zero_grad()
+                        self.step += 1
+
+                        # Update metrics for plotting at every actual step
+                        self.training_metrics['losses'].append(loss_dict['lm'].item())
+                        self.training_metrics['iteration_counts'].append(loss_dict['iterations'])
+                        self.training_metrics['convergence_diffs'].append(loss_dict['final_diff'])
+                        self.training_metrics['learning_rates'].append(self.scheduler.get_last_lr()[0])
+
+                        # Logging
+                        if self.step % self.config.log_interval == 0:
+                            if self.config.use_wandb:
+                                wandb.log({
+                                    'train/loss': loss_dict['lm'].item(),
+                                    'train/convergence_loss': loss_dict['convergence'].item(),
+                                    'train/efficiency_loss': loss_dict['efficiency'].item(),
+                                    'train/iterations': loss_dict['iterations'],
+                                    'train/convergence_diff': loss_dict['final_diff'],
+                                    'train/lr': self.scheduler.get_last_lr()[0],
+                                    'step': self.step
+                                })
+
+                        # Evaluation & Checkpointing (tied to optimizer steps)
+                        if self.step % self.config.eval_interval == 0:
+                            val_metrics = self.evaluate()
+                            print(f"\nStep {self.step} - Val Loss: {val_metrics['val_loss']:.4f}, Avg Iterations: {val_metrics['avg_iterations']:.1f}")
+                            sample_text, sample_iterations, sample_convergence = self.generate_sample()
+                            print(f"Sample (iters: {sample_iterations}, conv: {sample_convergence:.1e}): {sample_text[:200]}...\n")
+
+                            if self.config.use_wandb:
+                                wandb.log({
+                                    'val/loss': val_metrics['val_loss'], 'val/avg_iterations': val_metrics['avg_iterations'],
+                                    'val/avg_convergence_diff': val_metrics['avg_convergence_diff'],
+                                    'sample/text': wandb.Html(f"<pre>{sample_text}</pre>"),
+                                    'sample/iterations': sample_iterations, 'sample/convergence_diff': sample_convergence,
+                                    'step': self.step
+                                })
+
+                            if val_metrics['val_loss'] < self.best_val_loss:
+                                self.best_val_loss = val_metrics['val_loss']
+                                self.save_checkpoint(is_best=True)
+
+                        if self.step % self.config.save_interval == 0:
+                            self.save_checkpoint()
+
+                except RuntimeError as e:
+                    if 'out of memory' in str(e):
+                        print(f"\n[WARNING] OOM on batch {batch_idx}. Skipping optimizer step and clearing memory.")
+                        self.clear_memory()
+                        self.optimizer.zero_grad() # Crucial: clear partial gradients
+                        continue
+                    else:
+                        raise
         
         # Always save final model at end of training
         self.save_checkpoint(is_best=False)
@@ -520,12 +513,13 @@ def main():
         num_layers=8,
         max_seq_len=128,
         batch_size=32,  # Start smaller for this complex model
+        gradient_accumulation_steps=4, # Effective batch size = 32 * 4 = 128
         learning_rate=1e-4,
-        max_epochs=5,
+        max_epochs=1,
         use_wandb=False,  # Set to True if you want to use wandb
         num_workers=0,  # Safe default
         pin_memory=False,  # Safe default
-        max_samples=10000  # Limit for debugging/low memory
+        max_samples=1000  # Limit for debugging/low memory
     )
     
     # Create trainer

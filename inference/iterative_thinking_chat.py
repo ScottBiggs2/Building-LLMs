@@ -10,7 +10,7 @@ from typing import Optional
 
 @dataclass
 class InferenceConfig:
-    checkpoint_path: str = "checkpoints_iterative/checkpoint_step_16.pt"
+    checkpoint_path: str = "checkpoints_iterative/checkpoint_step_8.pt"
     data_dir: str = "shakespeare_data"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     
