@@ -185,18 +185,21 @@ class IterativeThinkingInference:
                 print(f"Thinking completed in {output['iterations']} iterations")
                 print(f"Final convergence difference: {output['final_diff']:.2e}")
             
-            # Apply sampling to generate tokens
-            sampled_tokens = input_ids.copy()
+            # Non-autoregressive generation: apply sampling to all positions at once
+            sampled_tokens = prompt_ids.copy()
             
-            for i in range(mask_start, len(input_ids)):
-                # Apply sampling to this position's logits
-                position_logits = self.apply_sampling(
-                    logits[i:i+1], temperature, top_k, top_p
-                )
-                probs = F.softmax(position_logits, dim=-1)
-                sampled_token = torch.multinomial(probs, 1).item()
-                sampled_tokens[i] = sampled_token
-        
+            # Get logits for the positions to be generated
+            generation_logits = logits[mask_start:]
+            
+            if generation_logits.shape[0] > 0:
+                # Apply sampling (temp, top-k, top-p) to all generation logits in parallel
+                sampled_logits = self.apply_sampling(generation_logits, temperature, top_k, top_p)
+                
+                # Get probabilities and sample new tokens
+                probs = F.softmax(sampled_logits, dim=-1)
+                new_tokens = torch.multinomial(probs, 1).squeeze(-1).tolist()
+                sampled_tokens.extend(new_tokens)
+
         # Decode result
         generated_text = self.decode_tokens(sampled_tokens)
         
