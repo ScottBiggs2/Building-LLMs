@@ -25,6 +25,7 @@ class CausalSelfAttention(nn.Module):
         self.num_heads = config.num_heads
         self.dim = config.dim
         self.head_dim = config.dim // config.num_heads
+
         
         # Key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(config.dim, 3 * config.dim, bias=config.bias)

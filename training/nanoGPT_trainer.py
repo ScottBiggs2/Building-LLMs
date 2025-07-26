@@ -53,7 +53,7 @@ class NanoGPTTrainingConfig:
     
     # Logging and saving
     log_interval: int = 100
-    save_interval: int = 2000
+    save_interval: int = 1000
     checkpoint_dir: str = "checkpoints_nanogpt"
     use_wandb: bool = False
     
@@ -213,54 +213,17 @@ class NanoGPTTrainer:
         print(f"  Batch size: {self.config.batch_size}")
         
         return train_loader, val_loader
-    
+        
     def create_optimizer(self):
-        """Create optimizer with weight decay configuration like GPT-2"""
-        # Separate parameters that should and shouldn't be weight decayed
-        decay = set()
-        no_decay = set()
-        whitelist_weight_modules = (torch.nn.Linear, )
-        blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.Embedding)
-        
-        for mn, m in self.model.named_modules():
-            for pn, p in m.named_parameters():
-                fpn = '%s.%s' % (mn, pn) if mn else pn # full param name
-                
-                if pn.endswith('bias'):
-                    # All biases will not be decayed
-                    no_decay.add(fpn)
-                elif pn.endswith('weight') and isinstance(m, whitelist_weight_modules):
-                    # Weights of whitelist modules will be weight decayed
-                    decay.add(fpn)
-                elif pn.endswith('weight') and isinstance(m, blacklist_weight_modules):
-                    # Weights of blacklist modules will NOT be weight decayed
-                    no_decay.add(fpn)
-        
-        # Special case the position embeddings
-        no_decay.add('transformer.wpe.weight')
-        
-        # Validate that we considered every parameter
-        param_dict = {pn: p for pn, p in self.model.named_parameters()}
-        inter_params = decay & no_decay
-        union_params = decay | no_decay
-        assert len(inter_params) == 0, "parameters %s made it into both decay/no_decay sets!" % (str(inter_params), )
-        assert len(param_dict.keys() - union_params) == 0, "parameters %s were not separated into either decay/no_decay set!" \
-                                                    % (str(param_dict.keys() - union_params), )
-        
         # Create the pytorch optimizer object
-        optim_groups = [
-            {"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": self.config.weight_decay},
-            {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
-        ]
-        
         optimizer = torch.optim.AdamW(
-            optim_groups,
+            self.model.parameters(),
             lr=self.config.learning_rate,
-            betas=(self.config.beta1, self.config.beta2)
+            betas=(self.config.beta1, self.config.beta2),
+            weight_decay=0.0
         )
-        
         return optimizer
-    
+
     def create_scheduler(self):
         """Create learning rate scheduler with warmup and cosine decay"""
         def lr_lambda(step):
@@ -441,6 +404,9 @@ class NanoGPTTrainer:
                 # Save checkpoint
                 if self.step % self.config.save_interval == 0:
                     self.save_checkpoint()
+            
+            # save checkpoint after each epoch
+            self.save_checkpoint()
     
     def plot_training_curves(self):
         """Plot training metrics"""
@@ -485,7 +451,7 @@ def main():
         model_size="small",  # 'tiny', 'small', 'medium'
         batch_size=16,
         learning_rate=6e-4,
-        max_epochs=20,
+        max_epochs=1,
         use_wandb=False,
         compile_model=False,  # Set to True if you have PyTorch 2.0+
         warmup_steps=1000
@@ -512,3 +478,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python -m training.nanoGPT_trainer

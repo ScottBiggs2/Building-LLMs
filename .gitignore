@@ -1,6 +1,7 @@
 .venv/
 shakespeare_data/
 checkpoints_iterative/
+checkpoints_nanogpt/
 __pycache__/
 **/__pycache__/
 *.pyc

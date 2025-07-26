@@ -6,6 +6,7 @@ from models.nanoGPT import NanoGPT, GPTConfig
 from dataclasses import dataclass
 from typing import Optional
 import time
+from training.nanoGPT_trainer import NanoGPTTrainingConfig
 
 @dataclass
 class NanoGPTInferenceConfig:
@@ -378,3 +379,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python -m inference.nanoGPT_chat
