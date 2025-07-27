@@ -185,23 +185,20 @@ class IterativeThinkingInference:
                 print(f"Thinking completed in {output['iterations']} iterations")
                 print(f"Final convergence difference: {output['final_diff']:.2e}")
             
-            # Non-autoregressive generation: apply sampling to all positions at once
-            sampled_tokens = prompt_ids.copy()
-            
-            # Get logits for the positions to be generated
-            generation_logits = logits[mask_start:]
-            
-            if generation_logits.shape[0] > 0:
-                # Apply sampling (temp, top-k, top-p) to all generation logits in parallel
-                sampled_logits = self.apply_sampling(generation_logits, temperature, top_k, top_p)
-                
-                # Get probabilities and sample new tokens
-                probs = F.softmax(sampled_logits, dim=-1)
-                new_tokens = torch.multinomial(probs, 1).squeeze(-1).tolist()
-                sampled_tokens.extend(new_tokens)
+            # Apply sampling to all logit positions in parallel
+            sampled_logits = self.apply_sampling(logits, temperature, top_k, top_p)
+            probs = F.softmax(sampled_logits, dim=-1)
+            # Sample from the entire distribution to get a full sequence of tokens
+            generated_tokens = torch.multinomial(probs, 1).squeeze(-1)
+
+            # Reconstruct the final sequence:
+            # Keep the original prompt and use the generated tokens for the masked positions.
+            final_tokens = input_ids.copy() # input_ids still contains the MASK tokens
+            for i in range(mask_start, len(final_tokens)):
+                final_tokens[i] = generated_tokens[i].item()
 
         # Decode result
-        generated_text = self.decode_tokens(sampled_tokens)
+        generated_text = self.decode_tokens(final_tokens)
         
         return {
             'text': generated_text,

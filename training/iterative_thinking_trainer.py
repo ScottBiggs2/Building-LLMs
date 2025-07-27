@@ -48,6 +48,8 @@ class TrainingConfig:
     # Convergence-specific
     convergence_weight: float = 0.05  # Weight for convergence loss
     efficiency_weight: float = 0.01  # Penalty for too many iterations
+    min_acceptable_iterations: int = 8
+    max_acceptable_iterations: int = 32
     
     # Logging
     log_interval: int = 100
@@ -226,23 +228,22 @@ class IterativeThinkingTrainer:
         # Convergence loss - encourage actual convergence
         convergence_loss = torch.tensor(final_diff, device=self.device) * self.config.convergence_weight
         
-        # NEW: Smarter iteration efficiency loss with warmup
+        # Iteration efficiency loss - encourage a "healthy" number of iterations
         efficiency_loss = torch.tensor(0.0, device=self.device)
         
-        # Only apply efficiency penalty after step 2000 (let it learn to think first)
-        if hasattr(self, 'step') and self.step > 200:
-            # Define acceptable range
-            min_acceptable = 8    # Don't penalize anything >= 8 iterations
-            max_acceptable = 32   # Start penalizing above 32 iterations
+        # Only apply efficiency penalty after the learning rate warmup period
+        if self.step > self.config.warmup_steps:
+            min_iter = self.config.min_acceptable_iterations
+            max_iter = self.config.max_acceptable_iterations
             
-            if iterations < min_acceptable:
-                # Heavy penalty for premature stopping
-                penalty = (min_acceptable - iterations) / min_acceptable
-                efficiency_loss = torch.tensor(penalty, device=self.device) * self.config.efficiency_weight * 3
-            elif iterations > max_acceptable:
-                # Gentle penalty for excessive thinking
-                penalty = (iterations - max_acceptable) / max_acceptable * 0.5
-                efficiency_loss = torch.tensor(penalty, device=self.device) * self.config.efficiency_weight
+            # Penalize stopping too early (quadratic penalty)
+            if iterations < min_iter:
+                penalty = ((min_iter - iterations) / min_iter) ** 2
+                efficiency_loss = penalty * self.config.efficiency_weight
+            # Penalize thinking for too long (quadratic penalty)
+            elif iterations > max_iter:
+                penalty = ((iterations - max_iter) / max_iter) ** 2
+                efficiency_loss = penalty * self.config.efficiency_weight
         
         total_loss = lm_loss + convergence_loss + efficiency_loss
         
