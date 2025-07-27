@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 import numpy as np
 import pickle
 import os
@@ -32,9 +33,11 @@ class TrainingConfig:
     # Training
     batch_size: int = 32
     learning_rate: float = 3e-4
+    min_lr: float = 3e-5  # Minimum learning rate for cosine decay
     weight_decay: float = 0.1
     max_epochs: int = 100
     warmup_steps: int = 1000
+    lr_decay_steps: int = None  # Set automatically based on epochs and dataset size
     gradient_accumulation_steps: int = 4  # Key for memory saving
     grad_clip: float = 1.0
     
@@ -86,11 +89,11 @@ class IterativeThinkingTrainer:
             weight_decay=config.weight_decay
         )
         
-        self.scheduler = CosineAnnealingLR(
-            self.optimizer,
-            T_max=config.max_epochs * len(self.train_loader)
-        )
+        # Set learning rate schedule parameters
+        if self.config.lr_decay_steps is None:
+            self.config.lr_decay_steps = self.config.max_epochs * (len(self.train_loader) // self.config.gradient_accumulation_steps)
         
+        self.scheduler = self.create_scheduler()
         # Initialize wandb
         if config.use_wandb:
             wandb.init(
@@ -299,6 +302,24 @@ class IterativeThinkingTrainer:
             'avg_convergence_diff': total_convergence_diff / num_batches
         }
     
+    def create_scheduler(self):
+        """Create learning rate scheduler with warmup and cosine decay."""
+        def lr_lambda(current_step: int):
+            # Linear warmup
+            if current_step < self.config.warmup_steps:
+                return float(current_step) / float(max(1, self.config.warmup_steps))
+            
+            # Cosine decay
+            progress = float(current_step - self.config.warmup_steps) / float(max(1, self.config.lr_decay_steps - self.config.warmup_steps))
+            # Clamp progress to [0, 1]
+            progress = max(0.0, min(1.0, progress))
+            
+            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+            decayed_lr = (1 - self.config.min_lr / self.config.learning_rate) * cosine_decay + self.config.min_lr / self.config.learning_rate
+            return decayed_lr
+
+        return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+
     def generate_sample(self, prompt: str = "HAMLET:", target_length: int = 200) -> str:
         """Generate text sample using non-autoregressive parallel generation"""
         self.model.eval()
@@ -509,17 +530,17 @@ def main():
     # Configuration - ready for a large overnight run
     config = TrainingConfig(
         data_dir="shakespeare_data",
-        dim=512,
-        num_layers=8,
-        max_seq_len=128,
+        dim=256,
+        num_layers=6,
+        max_seq_len=256,
         batch_size=32,  # Start smaller for this complex model
-        gradient_accumulation_steps=4, # Effective batch size = 32 * 4 = 128
+        gradient_accumulation_steps=1, # Effective batch size = 32 * 4 = 128
         learning_rate=1e-4,
-        max_epochs=1,
+        max_epochs = 1,
         use_wandb=False,  # Set to True if you want to use wandb
         num_workers=0,  # Safe default
         pin_memory=False,  # Safe default
-        max_samples=1000  # Limit for debugging/low memory
+        max_samples=10000  # Limit for debugging/low memory
     )
     
     # Create trainer

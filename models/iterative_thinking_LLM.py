@@ -50,7 +50,8 @@ class TransformerLayer(nn.Module):
         
         self.ff = nn.Sequential(
             nn.Linear(dim, ff_dim),
-            LearnedWaveletActivation(ff_dim),
+            # LearnedWaveletActivation(ff_dim),
+            nn.GELU(),
             nn.Linear(ff_dim, dim),
         )
         self.norm2 = nn.LayerNorm(dim)
@@ -95,7 +96,7 @@ class IterativeThinkingLLM(nn.Module):
         # L_{n-1}: Final layer with custom activation that outputs h_i and h_j
         self.final_layer = nn.Sequential(
             TransformerLayer(dim, dim * 4),
-            LearnedWaveletActivation(dim)
+            # LearnedWaveletActivation(dim)
         )
         
         # Split final layer output into h_i (for output) and h_j (for recurrence)
