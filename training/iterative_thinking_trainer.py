@@ -36,7 +36,7 @@ class TrainingConfig:
     min_lr: float = 3e-5  # Minimum learning rate for cosine decay
     weight_decay: float = 0.1
     max_epochs: int = 100
-    warmup_steps: int = 1000
+    warmup_steps: int = 100
     lr_decay_steps: int = None  # Set automatically based on epochs and dataset size
     gradient_accumulation_steps: int = 4  # Key for memory saving
     grad_clip: float = 1.0
@@ -53,7 +53,7 @@ class TrainingConfig:
     
     # Logging
     log_interval: int = 100
-    save_interval: int = 2000
+    save_interval: int = 500
     checkpoint_dir: str = "checkpoints_iterative"
     use_wandb: bool = True
     
