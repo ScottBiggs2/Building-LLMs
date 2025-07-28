@@ -2,6 +2,8 @@
 shakespeare_data/
 checkpoints_iterative/
 checkpoints_nanogpt/
+checkpoints_mamba/
+checkpoints_diffusion/
 __pycache__/
 **/__pycache__/
 *.pyc
