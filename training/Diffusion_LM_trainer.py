@@ -566,3 +566,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python -m training.Diffusion_LM_trainer

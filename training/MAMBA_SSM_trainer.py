@@ -229,47 +229,13 @@ class MambaTrainer:
         return train_loader, val_loader
     
     def create_optimizer(self):
-        """Create optimizer with weight decay configuration"""
-        # Separate parameters for weight decay
-        decay = set()
-        no_decay = set()
-        
-        for mn, m in self.model.named_modules():
-            for pn, p in m.named_parameters():
-                fpn = '%s.%s' % (mn, pn) if mn else pn
-                
-                if pn.endswith('bias'):
-                    no_decay.add(fpn)
-                elif pn.endswith('weight') and isinstance(m, (nn.Linear,)):
-                    decay.add(fpn)
-                elif pn.endswith('weight') and isinstance(m, (nn.LayerNorm, nn.Embedding)):
-                    no_decay.add(fpn)
-                else:
-                    # Special handling for Mamba-specific parameters
-                    if any(x in pn for x in ['A_log', 'D', 'dt_proj']):
-                        no_decay.add(fpn)
-                    else:
-                        decay.add(fpn)
-        
-        # Validate parameter separation
-        param_dict = {pn: p for pn, p in self.model.named_parameters()}
-        inter_params = decay & no_decay
-        union_params = decay | no_decay
-        assert len(inter_params) == 0, f"Parameters in both decay/no_decay: {inter_params}"
-        assert len(param_dict.keys() - union_params) == 0, f"Parameters not in either set: {param_dict.keys() - union_params}"
-        
-        # Create optimizer groups
-        optim_groups = [
-            {"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": self.config.weight_decay},
-            {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
-        ]
-        
+        # Create the pytorch optimizer object
         optimizer = torch.optim.AdamW(
-            optim_groups,
+            self.model.parameters(),
             lr=self.config.learning_rate,
-            betas=(self.config.beta1, self.config.beta2)
+            betas=(self.config.beta1, self.config.beta2),
+            weight_decay=0.0
         )
-        
         return optimizer
     
     def create_scheduler(self):
@@ -494,7 +460,7 @@ def main():
         model_size="small",  # 'tiny', 'small', 'medium'
         batch_size=16,
         learning_rate=5e-4,
-        max_epochs=20,
+        max_epochs=1,
         use_wandb=False,
         compile_model=False,  # Set to True if you have PyTorch 2.0+
         warmup_steps=1000
@@ -521,3 +487,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python -m training.MAMBA_SSM_trainer
