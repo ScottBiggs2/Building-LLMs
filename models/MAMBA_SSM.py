@@ -47,19 +47,22 @@ class SelectiveScan(nn.Module):
         """
         batch, seq_len, d_inner = u.shape
         
-        # Discretize A and B
-        deltaA = torch.exp(rearrange(delta, "b l d -> b l d 1") * rearrange(A, "d n -> 1 1 d n"))
-        deltaB_u = rearrange(delta, "b l d -> b l d 1") * rearrange(B, "b l n -> b l 1 n") * rearrange(u, "b l d -> b l d 1")
+        # Discretize A and B using broadcasting for efficiency
+        delta_unsqueezed = delta.unsqueeze(-1)
+        A_unsqueezed = A.unsqueeze(0).unsqueeze(0) # (d, n) -> (1, 1, d, n)
+        
+        deltaA = torch.exp(delta_unsqueezed * A_unsqueezed)
+        deltaB_u = delta_unsqueezed * B.unsqueeze(2) * u.unsqueeze(-1)
         
         if self.pscan:
             # Use parallel scan (more efficient for training)
             x = self.parallel_scan(deltaA, deltaB_u)
         else:
-            # Sequential scan (easier to understand)
+            # Sequential scan (slow, for reference)
             x = self.sequential_scan(deltaA, deltaB_u)
         
         # Output projection
-        y = torch.sum(x * rearrange(C, "b l n -> b l 1 n"), dim=3)
+        y = (x * C.unsqueeze(2)).sum(dim=3)
         
         # Skip connection
         if D is not None:

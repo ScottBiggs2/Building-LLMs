@@ -534,10 +534,10 @@ def main():
         dim=256,
         num_layers=6,
         max_seq_len=256,
-        batch_size=32,  # Start smaller for this complex model
-        gradient_accumulation_steps=1, # Effective batch size = 32 * 4 = 128
+        batch_size=8,  # More like the Diffusion approach
+        gradient_accumulation_steps=1, # Effective batch size = batch_size * gradient_accumulation_steps
         learning_rate=1e-4,
-        max_epochs = 1,
+        max_epochs = 5,
         use_wandb=False,  # Set to True if you want to use wandb
         num_workers=0,  # Safe default
         pin_memory=False,  # Safe default

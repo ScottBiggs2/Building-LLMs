@@ -9,6 +9,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import wandb
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import math
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
 import time
@@ -63,9 +64,9 @@ class MambaTrainingConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     compile_model: bool = False  # Use torch.compile if available
     
-    # Data loading
-    num_workers: int = 4
-    pin_memory: bool = True
+    # Data loading (set num_workers=0 for macOS/Windows to avoid multiprocessing issues)
+    num_workers: int = 0
+    pin_memory: bool = False
 
 class MambaTrainer:
     """Trainer for Mamba SSM model"""
@@ -249,7 +250,6 @@ class MambaTrainer:
             else:
                 return self.config.min_lr / self.config.learning_rate
         
-        import math
         return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
     
     def train_step(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> Dict:
@@ -457,13 +457,13 @@ def main():
     # Configuration
     config = MambaTrainingConfig(
         data_dir="shakespeare_data",
-        model_size="small",  # 'tiny', 'small', 'medium'
-        batch_size=16,
+        model_size="tiny",  # 'tiny', 'small', 'medium'
+        batch_size=8,
         learning_rate=5e-4,
         max_epochs=1,
-        use_wandb=False,
-        compile_model=False,  # Set to True if you have PyTorch 2.0+
-        warmup_steps=1000
+        use_wandb=False, # Set to True to log to Weights & Biases
+        compile_model=True,  # Enable JIT compilation for a massive speedup
+        warmup_steps=100
     )
     
     # Create trainer
